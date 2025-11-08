@@ -1,8 +1,6 @@
 // netlify/functions/zakeke-token.js
-// Returns a short-lived OAuth token from Zakeke.
-
 export async function handler(event) {
-  // CORS preflight (lets browsers call this from your Squarespace site)
+  // CORS / preflight
   if (event.httpMethod === "OPTIONS") {
     return {
       statusCode: 204,
@@ -26,37 +24,71 @@ export async function handler(event) {
     };
   }
 
-  const credentials = Buffer.from(`${clientId}:${clientSecret}`).toString("base64");
-  const body = new URLSearchParams({ grant_type: "client_credentials" }).toString();
+  try {
+    const credentials = Buffer.from(`${clientId}:${clientSecret}`).toString("base64");
+    const body = new URLSearchParams({ grant_type: "client_credentials" }).toString();
 
-  const res = await fetch("https://api.zakeke.com/token", {
-    method: "POST",
-    headers: {
-      "Authorization": `Basic ${credentials}`,
-      "Content-Type": "application/x-www-form-urlencoded",
-    },
-    body,
-  });
+    const res = await fetch("https://api.zakeke.com/token", {
+      method: "POST",
+      headers: {
+        "Authorization": `Basic ${credentials}`,
+        "Accept": "application/json",
+        "Content-Type": "application/x-www-form-urlencoded",
+      },
+      body,
+    });
 
-  const data = await res.json();
+    const ct = res.headers.get("content-type") || "";
+    const isJSON = ct.includes("application/json");
 
-  if (!res.ok) {
+    // Try to parse JSON if possible; otherwise read text for debugging
+    const payload = isJSON ? await res.json().catch(() => null) : null;
+    const text = !payload ? await res.text().catch(() => "") : null;
+
+    if (!res.ok) {
+      return {
+        statusCode: res.status,
+        headers: { "Access-Control-Allow-Origin": "*" },
+        body: JSON.stringify({
+          error: "Token request failed",
+          status: res.status,
+          contentType: ct,
+          detail: payload || text || "No response body",
+          hint: "Double-check ZAKEKE_CLIENT_ID / ZAKEKE_CLIENT_SECRET in Netlify env vars.",
+        }),
+      };
+    }
+
+    const accessToken = payload?.["access-token"] || payload?.access_token;
+    const expiresIn = payload?.expires_in;
+
+    if (!accessToken) {
+      return {
+        statusCode: 502,
+        headers: { "Access-Control-Allow-Origin": "*" },
+        body: JSON.stringify({
+          error: "No access token in response",
+          raw: payload || text,
+        }),
+      };
+    }
+
     return {
-      statusCode: res.status,
+      statusCode: 200,
+      headers: {
+        "Access-Control-Allow-Origin": "*",
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify({
+        "access-token": accessToken,
+        "expires_in": expiresIn,
+      }),
+    };
+  } catch (err) {
+    return {
+      statusCode: 500,
       headers: { "Access-Control-Allow-Origin": "*" },
-      body: JSON.stringify({ error: data.error || "Token request failed", detail: data }),
+      body: JSON.stringify({ error: "Function exception", message: String(err) }),
     };
   }
-
-  return {
-    statusCode: 200,
-    headers: {
-      "Access-Control-Allow-Origin": "*",
-      "Content-Type": "application/json",
-    },
-    body: JSON.stringify({
-      "access-token": data.access_token,
-      "expires_in": data.expires_in,
-    }),
-  };
 }
