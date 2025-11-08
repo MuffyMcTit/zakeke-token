@@ -1,5 +1,5 @@
 // netlify/functions/zakeke-token.js
-// Returns a short-lived OAuth token from Zakeke with detailed error info.
+// Returns a short-lived OAuth token from Zakeke with robust error handling.
 
 export async function handler(event) {
   // CORS preflight
@@ -19,19 +19,16 @@ export async function handler(event) {
   const clientSecret = process.env.ZAKEKE_CLIENT_SECRET;
 
   if (!clientId || !clientSecret) {
-    return {
-      statusCode: 500,
-      headers: { "Access-Control-Allow-Origin": "*" },
-      body: JSON.stringify({
-        error: "Missing env",
-        detail: "ZAKEKE_CLIENT_ID and/or ZAKEKE_CLIENT_SECRET are not set",
-      }),
-    };
+    return json(500, { error: "Missing ZAKEKE_CLIENT_ID or ZAKEKE_CLIENT_SECRET" });
   }
 
   try {
+    // Build Basic auth header
     const credentials = Buffer.from(`${clientId}:${clientSecret}`).toString("base64");
-    const form = new URLSearchParams({ grant_type: "client_credentials" });
+
+    // Timeout guard (12s)
+    const controller = new AbortController();
+    const to = setTimeout(() => controller.abort(new Error("Fetch timeout")), 12000);
 
     const res = await fetch("https://api.zakeke.com/token", {
       method: "POST",
@@ -39,67 +36,64 @@ export async function handler(event) {
         "Authorization": `Basic ${credentials}`,
         "Content-Type": "application/x-www-form-urlencoded",
       },
-      body: form.toString(),
+      body: new URLSearchParams({ grant_type: "client_credentials" }).toString(),
+      signal: controller.signal,
+    }).catch((e) => {
+      throw new Error(`Network error to Zakeke: ${e.message}`);
     });
+    clearTimeout(to);
 
-    const contentType = res.headers.get("content-type") || "";
-    const text = await res.text(); // read raw first for better diagnostics
+    // Always read as text first (handles empty/HTML/plain text bodies)
+    const raw = await res.text();
+    const contentType = (res.headers.get("content-type") || "").toLowerCase();
+
+    let parsed = null;
+    if (raw && contentType.includes("application/json")) {
+      try { parsed = JSON.parse(raw); } catch { /* ignore parse error */ }
+    }
 
     if (!res.ok) {
-      const debug = {
-    status: res.status,
-    contentType,
-    text: text || null,
-    json: data || null
-  };
+      // Prefer parsed JSON error if available, else fall back to raw/statusText
+      const detail = parsed || (raw ? { raw } : { statusText: res.statusText || "" });
+      return json(res.status || 500, {
+        error: "Token request failed",
+        status: res.status || 500,
+        contentType,
+        detail,
+        hint: "Double-check ZAKEKE_CLIENT_ID / ZAKEKE_CLIENT_SECRET and that they were saved before redeploy.",
+      });
+    }
 
+    // Success path: need access_token in the parsed JSON
+    if (!parsed || !parsed.access_token) {
+      return json(500, {
+        error: "Token response missing access_token",
+        contentType,
+        raw: raw || "",
+      });
+    }
+
+    return json(200, {
+      "access-token": parsed.access_token,
+      "expires_in": parsed.expires_in,
+    });
+
+  } catch (err) {
+    return json(500, {
+      error: "Function error",
+      message: String(err && err.message ? err.message : err),
+    });
+  }
+}
+
+// helper
+function json(status, obj) {
   return {
-    statusCode: res.status || 500,
+    statusCode: status,
     headers: {
       "Access-Control-Allow-Origin": "*",
       "Content-Type": "application/json",
     },
-    body: JSON.stringify({
-      error: "Token request failed",
-      debug,
-      hint: "Your Client ID / Secret were received by Netlify, but Zakeke rejected them. That means formatting or whitespace is still off."
-    })
+    body: JSON.stringify(obj),
   };
-    }
-
-    // Success: parse JSON body into our smaller payload
-    let data;
-    try {
-      data = JSON.parse(text);
-    } catch (e) {
-      return {
-        statusCode: 500,
-        headers: { "Access-Control-Allow-Origin": "*", "Content-Type": "application/json" },
-        body: JSON.stringify({
-          error: "Unexpected non-JSON token response",
-          status: res.status,
-          contentType,
-          detail: text,
-        }),
-      };
-    }
-
-    return {
-      statusCode: 200,
-      headers: {
-        "Access-Control-Allow-Origin": "*",
-        "Content-Type": "application/json",
-      },
-      body: JSON.stringify({
-        "access-token": data.access_token,
-        "expires_in": data.expires_in,
-      }),
-    };
-  } catch (err) {
-    return {
-      statusCode: 500,
-      headers: { "Access-Control-Allow-Origin": "*", "Content-Type": "application/json" },
-      body: JSON.stringify({ error: "Function error", message: String(err) }),
-    };
-  }
 }
