@@ -46,29 +46,25 @@ export async function handler(event) {
     const text = await res.text(); // read raw first for better diagnostics
 
     if (!res.ok) {
-      // Try to parse JSON if possible
-      let detail = text;
-      try {
-        const maybeJson = JSON.parse(text);
-        detail = maybeJson;
-      } catch (_) {
-        // leave detail as raw text
-      }
+      const debug = {
+    status: res.status,
+    contentType,
+    text: text || null,
+    json: data || null
+  };
 
-      return {
-        statusCode: 500,
-        headers: {
-          "Access-Control-Allow-Origin": "*",
-          "Content-Type": "application/json",
-        },
-        body: JSON.stringify({
-          error: "Token request failed",
-          status: res.status,
-          contentType,
-          detail,
-          hint: "Double-check ZAKEKE_CLIENT_ID / ZAKEKE_CLIENT_SECRET and that they were saved before redeploy.",
-        }),
-      };
+  return {
+    statusCode: res.status || 500,
+    headers: {
+      "Access-Control-Allow-Origin": "*",
+      "Content-Type": "application/json",
+    },
+    body: JSON.stringify({
+      error: "Token request failed",
+      debug,
+      hint: "Your Client ID / Secret were received by Netlify, but Zakeke rejected them. That means formatting or whitespace is still off."
+    })
+  };
     }
 
     // Success: parse JSON body into our smaller payload
