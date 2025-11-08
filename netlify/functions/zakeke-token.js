@@ -1,6 +1,4 @@
 // netlify/functions/zakeke-token.js
-// Returns a short-lived OAuth token from Zakeke with robust error handling.
-
 export async function handler(event) {
   // CORS preflight
   if (event.httpMethod === "OPTIONS") {
@@ -19,16 +17,19 @@ export async function handler(event) {
   const clientSecret = process.env.ZAKEKE_CLIENT_SECRET;
 
   if (!clientId || !clientSecret) {
-    return json(500, { error: "Missing ZAKEKE_CLIENT_ID or ZAKEKE_CLIENT_SECRET" });
+    return {
+      statusCode: 500,
+      headers: { "Access-Control-Allow-Origin": "*" },
+      body: JSON.stringify({
+        error: "Missing credentials",
+        hint: "Add ZAKEKE_CLIENT_ID and ZAKEKE_CLIENT_SECRET in Site settings → Environment variables, then redeploy.",
+      }),
+    };
   }
 
   try {
-    // Build Basic auth header
     const credentials = Buffer.from(`${clientId}:${clientSecret}`).toString("base64");
-
-    // Timeout guard (12s)
-    const controller = new AbortController();
-    const to = setTimeout(() => controller.abort(new Error("Fetch timeout")), 12000);
+    const form = new URLSearchParams({ grant_type: "client_credentials" });
 
     const res = await fetch("https://api.zakeke.com/token", {
       method: "POST",
@@ -36,64 +37,65 @@ export async function handler(event) {
         "Authorization": `Basic ${credentials}`,
         "Content-Type": "application/x-www-form-urlencoded",
       },
-      body: new URLSearchParams({ grant_type: "client_credentials" }).toString(),
-      signal: controller.signal,
-    }).catch((e) => {
-      throw new Error(`Network error to Zakeke: ${e.message}`);
+      body: form.toString(),
     });
-    clearTimeout(to);
 
-    // Always read as text first (handles empty/HTML/plain text bodies)
+    const contentType = res.headers.get("content-type") || "";
+
+    // Read body safely as text first
     const raw = await res.text();
-    const contentType = (res.headers.get("content-type") || "").toLowerCase();
-
-    let parsed = null;
+    let json = null;
     if (raw && contentType.includes("application/json")) {
-      try { parsed = JSON.parse(raw); } catch { /* ignore parse error */ }
+      try { json = JSON.parse(raw); } catch (_) { /* ignore */ }
     }
 
     if (!res.ok) {
-      // Prefer parsed JSON error if available, else fall back to raw/statusText
-      const detail = parsed || (raw ? { raw } : { statusText: res.statusText || "" });
-      return json(res.status || 500, {
-        error: "Token request failed",
-        status: res.status || 500,
-        contentType,
-        detail,
-        hint: "Double-check ZAKEKE_CLIENT_ID / ZAKEKE_CLIENT_SECRET and that they were saved before redeploy.",
-      });
+      return {
+        statusCode: res.status,
+        headers: { "Access-Control-Allow-Origin": "*" },
+        body: JSON.stringify({
+          error: "Token request failed",
+          status: res.status,
+          contentType,
+          detail: raw || "No response body",
+          hint: "Double-check ZAKEKE_CLIENT_ID / ZAKEKE_CLIENT_SECRET (no extra spaces/period) and that they were saved before redeploy.",
+        }),
+      };
     }
 
-    // Success path: need access_token in the parsed JSON
-    if (!parsed || !parsed.access_token) {
-      return json(500, {
-        error: "Token response missing access_token",
-        contentType,
-        raw: raw || "",
-      });
+    const accessToken = json?.access_token || (json && json.accessToken);
+    const expiresIn = json?.expires_in || 3600;
+
+    if (!accessToken) {
+      return {
+        statusCode: 500,
+        headers: { "Access-Control-Allow-Origin": "*" },
+        body: JSON.stringify({
+          error: "Token missing in response",
+          detail: raw || "Empty response",
+        }),
+      };
     }
 
-    return json(200, {
-      "access-token": parsed.access_token,
-      "expires_in": parsed.expires_in,
-    });
-
+    return {
+      statusCode: 200,
+      headers: {
+        "Access-Control-Allow-Origin": "*",
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify({
+        "access-token": accessToken,
+        "expires_in": expiresIn,
+      }),
+    };
   } catch (err) {
-    return json(500, {
-      error: "Function error",
-      message: String(err && err.message ? err.message : err),
-    });
+    return {
+      statusCode: 500,
+      headers: { "Access-Control-Allow-Origin": "*" },
+      body: JSON.stringify({
+        error: "Function error",
+        message: String(err?.message || err),
+      }),
+    };
   }
-}
-
-// helper
-function json(status, obj) {
-  return {
-    statusCode: status,
-    headers: {
-      "Access-Control-Allow-Origin": "*",
-      "Content-Type": "application/json",
-    },
-    body: JSON.stringify(obj),
-  };
 }
