@@ -1,6 +1,7 @@
-// netlify/functions/zakeke-token.js
+// Returns a short-lived OAuth token from Zakeke with strong error handling.
+
 export async function handler(event) {
-  // CORS preflight
+  // CORS (so your Squarespace page can call this)
   if (event.httpMethod === "OPTIONS") {
     return {
       statusCode: 204,
@@ -13,14 +14,14 @@ export async function handler(event) {
     };
   }
 
-  let clientId = (process.env.ZAKEKE_CLIENT_ID || "").trim();
-  let clientSecret = (process.env.ZAKEKE_CLIENT_SECRET || "").trim();
-
-  if (!clientId || !clientSecret) {
-    return json(500, { error: "Missing ZAKEKE_CLIENT_ID or ZAKEKE_CLIENT_SECRET" });
-  }
-
   try {
+    const clientId = process.env.ZAKEKE_CLIENT_ID;
+    const clientSecret = process.env.ZAKEKE_CLIENT_SECRET;
+
+    if (!clientId || !clientSecret) {
+      return json(500, { error: "Missing env vars ZAKEKE_CLIENT_ID or ZAKEKE_CLIENT_SECRET" });
+    }
+
     const credentials = Buffer.from(`${clientId}:${clientSecret}`).toString("base64");
     const body = new URLSearchParams({ grant_type: "client_credentials" }).toString();
 
@@ -29,49 +30,63 @@ export async function handler(event) {
       headers: {
         "Authorization": `Basic ${credentials}`,
         "Content-Type": "application/x-www-form-urlencoded",
-        "Accept": "application/json",
       },
       body,
     });
 
     const contentType = res.headers.get("content-type") || "";
-    let data = null;
-
-    // Zakeke should return JSON; if not, avoid JSON.parse crash
-    if (contentType.includes("application/json")) {
-      data = await res.json();
-    } else {
-      // Try text so we can surface statusText/body when things go wrong
-      const text = await res.text();
-      if (!res.ok) {
-        return json(res.status, {
-          error: "Token request failed",
-          status: res.status,
-          contentType,
-          detail: text || res.statusText,
-          hint: "Check Client ID/Secret, headers, and that env vars are approved.",
-        });
-      }
-      // Unexpected but OK
-      return json(200, { "access-token": text, note: "Non-JSON token response" });
+    const rawText = await res.text(); // read once
+    let parsed;
+    try {
+      parsed = contentType.includes("application/json") ? JSON.parse(rawText) : null;
+    } catch (e) {
+      parsed = null;
     }
 
+    // Helpful debug in Netlify function logs
+    console.log("Zakeke token response:", {
+      status: res.status,
+      contentType,
+      hasJson: !!parsed,
+      rawText: contentType.includes("application/json") ? undefined : rawText?.slice(0, 300),
+    });
+
     if (!res.ok) {
+      // Surface exactly what Zakeke returned
       return json(res.status, {
         error: "Token request failed",
         status: res.status,
-        detail: data,
-        hint: "Verify credentials and ensure no extra whitespace.",
+        contentType,
+        detail: parsed || rawText || null,
       });
     }
 
-    // Happy path
-    return json(200, {
-      "access-token": data["access-token"] || data.access_token,
-      "expires_in": data.expires_in,
-    });
+    const access_token = parsed?.access_token || parsed?.accessToken;
+    const expires_in = parsed?.expires_in;
+
+    if (!access_token) {
+      return json(500, {
+        error: "Token response missing access_token",
+        status: res.status,
+        contentType,
+        detail: parsed || rawText || null,
+      });
+    }
+
+    return {
+      statusCode: 200,
+      headers: {
+        "Access-Control-Allow-Origin": "*",
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify({
+        "access-token": access_token,
+        "expires_in": expires_in,
+      }),
+    };
   } catch (err) {
-    return json(500, { error: "Function error", message: String(err) });
+    console.error("Function crash:", err);
+    return json(500, { error: "Function error", message: String(err?.message || err) });
   }
 }
 
