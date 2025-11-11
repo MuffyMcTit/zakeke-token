@@ -1,9 +1,5 @@
 // netlify/functions/zakeke-token.js
-// Returns a short-lived OAuth token from Zakeke, using FORM FIELDS
-// (client_id & client_secret in the body) instead of Basic auth.
-
 export async function handler(event) {
-  // CORS preflight
   if (event.httpMethod === "OPTIONS") {
     return {
       statusCode: 204,
@@ -23,17 +19,19 @@ export async function handler(event) {
     return {
       statusCode: 500,
       headers: { "Access-Control-Allow-Origin": "*" },
-      body: JSON.stringify({ error: "Missing ZAKEKE_CLIENT_ID or ZAKEKE_CLIENT_SECRET" }),
+      body: JSON.stringify({ error: "Server missing API keys" }),
     };
   }
 
-  try {
-    const form = new URLSearchParams();
-    form.set("grant_type", "client_credentials");
-    form.set("client_id", clientId);
-    form.set("client_secret", clientSecret);
+  // ✅ Send client_id and client_secret in the body (not Basic auth)
+  const form = new URLSearchParams();
+  form.set("grant_type", "client_credentials");
+  form.set("client_id", clientId);
+  form.set("client_secret", clientSecret);
 
-    const res = await fetch("https://api.zakeke.com/token", {
+  let res, text = "";
+  try {
+    res = await fetch("https://api.zakeke.com/token", {
       method: "POST",
       headers: {
         "Content-Type": "application/x-www-form-urlencoded",
@@ -41,50 +39,51 @@ export async function handler(event) {
       },
       body: form.toString(),
     });
-
-    const rawText = await res.text();
-    const contentType = res.headers.get("content-type") || "";
-    const hasJson = contentType.includes("application/json");
-    const data = hasJson && rawText ? JSON.parse(rawText) : null;
-
-    // Helpful logs visible in Netlify → Functions → Logs
-    console.log("Zakeke token response:", {
-      status: res.status,
-      contentType,
-      hasJson,
-      rawText: hasJson ? undefined : rawText, // avoid logging tokens
-    });
-
-    if (!res.ok) {
-      return {
-        statusCode: res.status,
-        headers: { "Access-Control-Allow-Origin": "*" },
-        body: JSON.stringify({
-          error: "Token request failed",
-          status: res.status,
-          contentType,
-          detail: hasJson ? data : rawText || "",
-        }),
-      };
-    }
-
+    // read as text first so we can show something even if JSON is empty
+    text = await res.text();
+  } catch (e) {
     return {
-      statusCode: 200,
-      headers: {
-        "Access-Control-Allow-Origin": "*",
-        "Content-Type": "application/json",
-      },
+      statusCode: 502,
+      headers: { "Access-Control-Allow-Origin": "*" },
+      body: JSON.stringify({ error: "Network error contacting Zakeke", detail: String(e) }),
+    };
+  }
+
+  if (!res.ok) {
+    // Try to parse JSON; fall back to raw text
+    let detail = text;
+    try { detail = JSON.parse(text); } catch {}
+    return {
+      statusCode: res.status,
+      headers: { "Access-Control-Allow-Origin": "*" },
       body: JSON.stringify({
-        "access-token": data.access_token,
-        "expires_in": data.expires_in,
+        error: "Token request failed",
+        status: res.status,
+        contentType: res.headers.get("content-type") || "",
+        detail,
       }),
     };
-  } catch (err) {
-    console.error("Token function crash:", err);
+  }
+
+  // Success
+  let data;
+  try { data = JSON.parse(text); } catch {
     return {
       statusCode: 500,
       headers: { "Access-Control-Allow-Origin": "*" },
-      body: JSON.stringify({ error: "Function error", message: String(err?.message || err) }),
+      body: JSON.stringify({ error: "Zakeke returned non-JSON on success", raw: text }),
     };
   }
+
+  return {
+    statusCode: 200,
+    headers: {
+      "Access-Control-Allow-Origin": "*",
+      "Content-Type": "application/json",
+    },
+    body: JSON.stringify({
+      "access-token": data.access_token,
+      "expires_in": data.expires_in,
+    }),
+  };
 }
