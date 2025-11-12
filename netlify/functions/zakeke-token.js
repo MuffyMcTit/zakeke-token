@@ -1,5 +1,7 @@
 // netlify/functions/zakeke-token.js
-// Returns a short-lived OAuth token from Zakeke using BODY credentials (like your curl).
+// Returns a short-lived OAuth token from Zakeke.
+// This version sends client_id & client_secret in the POST BODY
+// (the same way your successful curl did), not via Basic Auth.
 
 export async function handler(event) {
   // CORS preflight
@@ -15,63 +17,82 @@ export async function handler(event) {
     };
   }
 
-  try {
-    const clientId = process.env.ZAKEKE_CLIENT_ID;
-    const clientSecret = process.env.ZAKEKE_CLIENT_SECRET;
+  if (event.httpMethod !== "GET") {
+    return {
+      statusCode: 405,
+      headers: { "Access-Control-Allow-Origin": "*" },
+      body: JSON.stringify({ error: "Method not allowed" }),
+    };
+  }
 
-    if (!clientId || !clientSecret) {
+  const clientId = (process.env.ZAKEKE_CLIENT_ID || "").trim();
+  const clientSecret = (process.env.ZAKEKE_CLIENT_SECRET || "").trim();
+
+  if (!clientId || !clientSecret) {
+    return {
+      statusCode: 500,
+      headers: { "Access-Control-Allow-Origin": "*" },
+      body: JSON.stringify({
+        error: "Missing env vars",
+        hint: "Set ZAKEKE_CLIENT_ID and ZAKEKE_CLIENT_SECRET, then redeploy.",
+      }),
+    };
+  }
+
+  // Build x-www-form-urlencoded body (matches your successful curl)
+  const body = new URLSearchParams({
+    grant_type: "client_credentials",
+    client_id: clientId,
+    client_secret: clientSecret,
+  }).toString();
+
+  let status = 0;
+  let contentType = "";
+  let rawText = "";
+
+  try {
+    const res = await fetch("https://api.zakeke.com/token", {
+      method: "POST",
+      headers: {
+        "Accept": "application/json",
+        "Content-Type": "application/x-www-form-urlencoded",
+      },
+      body,
+    });
+
+    status = res.status;
+    contentType = res.headers.get("content-type") || "";
+
+    // Read text first so we can safely handle empty bodies
+    rawText = await res.text();
+
+    if (!res.ok) {
+      // Pass through server details to help debugging
       return {
         statusCode: 500,
         headers: { "Access-Control-Allow-Origin": "*" },
-        body: JSON.stringify({ error: "Missing env vars ZAKEKE_CLIENT_ID / ZAKEKE_CLIENT_SECRET" }),
-      };
-    }
-
-    // ✅ Match your working curl: send creds in the form body (no Basic auth header)
-    const form = new URLSearchParams({
-      grant_type: "client_credentials",
-      client_id: clientId,
-      client_secret: clientSecret,
-    }).toString();
-
-    const res = await fetch("https://api.zakeke.com/token", {
-      method: "POST",
-      headers: { "Content-Type": "application/x-www-form-urlencoded", "Accept": "application/json" },
-      body: form,
-    });
-
-    const contentType = res.headers.get("content-type") || "";
-    const rawText = await res.text();
-    const hasJson = contentType.includes("application/json");
-    const data = hasJson ? JSON.parse(rawText) : null;
-
-    console.log("Zakeke token response:", {
-      status: res.status,
-      contentType,
-      hasJson,
-      rawText: hasJson ? "[json]" : rawText?.slice(0, 200) || "",
-    });
-
-    if (!res.ok) {
-      return {
-        statusCode: res.status,
-        headers: { "Access-Control-Allow-Origin": "*" },
         body: JSON.stringify({
           error: "Token request failed",
-          status: res.status,
+          status,
           contentType,
-          detail: hasJson ? data : rawText,
+          detail: rawText || "",
         }),
       };
     }
 
-    if (!data?.access_token) {
+    // Parse JSON (should look like { access_token, token_type, expires_in })
+    let data;
+    try {
+      data = JSON.parse(rawText);
+    } catch {
       return {
         statusCode: 500,
         headers: { "Access-Control-Allow-Origin": "*" },
         body: JSON.stringify({
-          error: "Token JSON missing access_token",
-          detail: hasJson ? data : rawText,
+          error: "Token parse failed",
+          status,
+          contentType,
+          detail: rawText.slice(0, 2000),
         }),
       };
     }
@@ -84,15 +105,20 @@ export async function handler(event) {
       },
       body: JSON.stringify({
         "access-token": data.access_token,
-        "expires_in": data.expires_in ?? 3600,
+        "expires_in": data.expires_in,
       }),
     };
   } catch (err) {
-    console.error("Token function crash:", err);
     return {
       statusCode: 500,
       headers: { "Access-Control-Allow-Origin": "*" },
-      body: JSON.stringify({ error: "Unhandled error", detail: String(err?.message || err) }),
+      body: JSON.stringify({
+        error: "Function error",
+        message: err?.message || String(err),
+        status,
+        contentType,
+        detail: rawText,
+      }),
     };
   }
 }
