@@ -1,5 +1,6 @@
 // netlify/functions/zakeke-token.js
-// Returns a short-lived OAuth token from Zakeke.
+// Returns a short-lived OAuth token from Zakeke using BODY credentials
+// (grant_type=client_credentials&client_id=...&client_secret=...)
 
 export async function handler(event) {
   // CORS preflight
@@ -28,37 +29,69 @@ export async function handler(event) {
     };
   }
 
-  const credentials = Buffer.from(`${clientId}:${clientSecret}`).toString("base64");
-  const body = new URLSearchParams({ grant_type: "client_credentials" }).toString();
+  // Build the body exactly like the working curl:
+  // -d "grant_type=client_credentials&client_id=...&client_secret=..."
+  const body = new URLSearchParams({
+    grant_type: "client_credentials",
+    client_id: clientId,
+    client_secret: clientSecret,
+  }).toString();
 
-  const response = await fetch("https://api.zakeke.com/token", {
-    method: "POST",
-    headers: {
-      "Authorization": `Basic ${credentials}`,
-      "Content-Type": "application/x-www-form-urlencoded",
-      "Accept": "application/json",
-    },
-    body,
-  });
-
-  const text = await response.text();
-
-  let data = null;
+  let res;
   try {
-    data = text ? JSON.parse(text) : null;
-  } catch {
-    // ignore JSON parse error; we'll handle below
+    res = await fetch("https://api.zakeke.com/token", {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/x-www-form-urlencoded",
+        "Accept": "application/json",
+      },
+      body,
+    });
+  } catch (err) {
+    return {
+      statusCode: 500,
+      headers: { "Access-Control-Allow-Origin": "*" },
+      body: JSON.stringify({
+        error: "Network error calling Zakeke",
+        detail: String(err),
+      }),
+    };
   }
 
-  if (!response.ok) {
+  const contentType = res.headers.get("content-type") || "";
+  const rawText = await res.text();
+  let data = null;
+
+  if (contentType.includes("application/json") && rawText) {
+    try {
+      data = JSON.parse(rawText);
+    } catch (e) {
+      // leave data = null, we'll expose rawText below
+    }
+  }
+
+  if (!res.ok) {
     return {
       statusCode: 500,
       headers: { "Access-Control-Allow-Origin": "*" },
       body: JSON.stringify({
         error: "Token request failed",
-        status: response.status,
-        contentType: response.headers.get("content-type") || "",
-        detail: data || text || "",
+        status: res.status,
+        contentType,
+        detail: data || rawText,
+      }),
+    };
+  }
+
+  if (!data || !data.access_token) {
+    return {
+      statusCode: 500,
+      headers: { "Access-Control-Allow-Origin": "*" },
+      body: JSON.stringify({
+        error: "No access_token in Zakeke response",
+        status: res.status,
+        contentType,
+        detail: rawText,
       }),
     };
   }
@@ -70,8 +103,8 @@ export async function handler(event) {
       "Content-Type": "application/json",
     },
     body: JSON.stringify({
-      "access-token": data && data.access_token,
-      "expires_in": data && data.expires_in,
+      "access-token": data.access_token,
+      "expires_in": data.expires_in,
     }),
   };
 }
